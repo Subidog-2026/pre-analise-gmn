@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import ContractSimulation from "@/components/ContractSimulation";
-import { brl, dateBR, getJson } from "@/lib/fetcher";
+import { brl, dateBR, getJson, postJson } from "@/lib/fetcher";
 import type { AgencyService, AgencySettings, HistoryGrid, HistorySnapshot, PlaceAnalysis } from "@/lib/types";
 
 type Line = AgencyService & { selected: boolean };
@@ -16,8 +16,11 @@ export default function PropostaPage() {
   const [grid, setGrid] = useState<HistoryGrid | null>(null);
   const [lines, setLines] = useState<Line[]>([]);
   const [contact, setContact] = useState("");
-  // Tempos de contrato da simulação: começam com os de Configurações e podem ser ajustados nesta proposta.
+  // Serviços, tempos de contrato e observações começam com o padrão salvo e podem ser ajustados nesta proposta.
   const [terms, setTerms] = useState<number[]>([]);
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -31,6 +34,7 @@ export default function PropostaPage() {
         setSettings(s.settings);
         setLines(s.settings.services.map((sv) => ({ ...sv, selected: true })));
         setTerms(s.settings.contractTerms);
+        setNotes(s.settings.proposalNotes);
         setGrid(h.grids[h.grids.length - 1] ?? null);
       })
       .catch((e) => setError(e.message));
@@ -50,6 +54,29 @@ export default function PropostaPage() {
   const agency = settings.agencyName || "Sua agência";
   const setLine = (i: number, patch: Partial<Line>) => setLines(lines.map((l, j) => (j === i ? { ...l, ...patch } : l)));
 
+  /** Grava os serviços, os tempos de contrato e as observações desta tela como padrão das próximas propostas. */
+  async function saveAsDefault() {
+    if (!settings) return;
+    setSaving(true);
+    setMsg(null);
+    setError(null);
+    try {
+      const body: AgencySettings = {
+        ...settings,
+        services: lines.map(({ selected: _selected, ...s }) => s),
+        contractTerms: terms,
+        proposalNotes: notes,
+      };
+      const d = await postJson<{ settings: AgencySettings }>("/api/settings", body, "PUT");
+      setSettings(d.settings);
+      setMsg("Salvo como padrão: as próximas propostas já abrem assim.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Falha ao salvar");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <>
       <div className="no-print">
@@ -58,26 +85,94 @@ export default function PropostaPage() {
         </p>
         <h1>Proposta comercial</h1>
         <p className="sub">
-          Ajuste os itens e imprima em PDF. Os dados da agência e os serviços padrão vêm de <Link href="/configuracoes">Configurações</Link>.
+          Ajuste os serviços e imprima em PDF. Os dados da agência (nome, contato) vêm de{" "}
+          <Link href="/configuracoes">Configurações</Link>.
         </p>
         <section className="card">
           <label className="field">
             A/C (nome do contato no cliente)
             <input value={contact} onChange={(e) => setContact(e.target.value)} placeholder="Ex.: João Silva" />
           </label>
-          <h3 style={{ marginTop: 14 }}>Serviços</h3>
-          {lines.map((l, i) => (
-            <div className="row" key={i} style={{ alignItems: "center", marginBottom: 8 }}>
-              <input type="checkbox" checked={l.selected} onChange={(e) => setLine(i, { selected: e.target.checked })} style={{ width: 18, height: 18 }} />
-              <span style={{ flex: 1 }}>
-                {l.name || "(sem nome)"} <span className="badge">{l.type === "recorrente" ? "mensal" : "fixo"}</span>
-              </span>
-              <input type="number" min={0} step="0.01" value={l.price} onChange={(e) => setLine(i, { price: Number(e.target.value) })} style={{ width: 130 }} />
+        </section>
+
+        <section className="card">
+          <h2>Serviços da proposta</h2>
+          <p className="sub">
+            Marque os que entram nesta proposta e ajuste à vontade. Para usar a lista em todas as propostas, clique em
+            “Salvar como padrão”.
+          </p>
+
+          {(["fixo", "recorrente"] as const).map((type) => (
+            <div key={type} className="service-group">
+              <h3>{type === "fixo" ? "Fixo (pago uma vez)" : "Recorrente (mensalidade)"}</h3>
+              {lines.map((l, i) =>
+                l.type !== type ? null : (
+                  <div key={i} className="row" style={{ marginBottom: 12, alignItems: "start" }}>
+                    <label className="field" style={{ width: 70, alignItems: "center" }}>
+                      Incluir
+                      <input
+                        type="checkbox"
+                        checked={l.selected}
+                        onChange={(e) => setLine(i, { selected: e.target.checked })}
+                        style={{ width: 18, height: 18, marginTop: 10 }}
+                      />
+                    </label>
+                    <label className="field" style={{ flex: 1, minWidth: 180 }}>
+                      Serviço
+                      <input value={l.name} onChange={(e) => setLine(i, { name: e.target.value })} />
+                    </label>
+                    <label className="field" style={{ flex: 2, minWidth: 220 }}>
+                      Descrição
+                      <input value={l.description} onChange={(e) => setLine(i, { description: e.target.value })} />
+                    </label>
+                    <label className="field" style={{ width: 140 }}>
+                      {type === "fixo" ? "Valor (R$)" : "Valor/mês (R$)"}
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        value={l.price}
+                        onChange={(e) => setLine(i, { price: Number(e.target.value) })}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className="btn-sm btn-danger"
+                      style={{ marginTop: 22 }}
+                      onClick={() => setLines(lines.filter((_, j) => j !== i))}
+                    >
+                      Remover
+                    </button>
+                  </div>
+                ),
+              )}
+              <button
+                type="button"
+                className="btn-ghost btn-sm"
+                onClick={() => setLines([...lines, { name: "", description: "", price: 0, type, selected: true }])}
+              >
+                + Adicionar serviço {type === "fixo" ? "fixo" : "recorrente"}
+              </button>
             </div>
           ))}
-          <button onClick={() => window.print()} style={{ marginTop: 8 }}>
-            Imprimir / salvar PDF
-          </button>
+
+          <label className="field" style={{ marginTop: 18 }}>
+            Observações da proposta (condições, validade, prazos)
+            <textarea rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} />
+          </label>
+
+          <div className="row" style={{ marginTop: 14, alignItems: "center" }}>
+            <button type="button" onClick={() => window.print()}>
+              Imprimir / salvar PDF
+            </button>
+            <button type="button" className="btn-ghost" onClick={saveAsDefault} disabled={saving}>
+              {saving ? "Salvando..." : "Salvar como padrão"}
+            </button>
+            {msg && <span className="small">{msg}</span>}
+          </div>
+          <p className="small" style={{ marginBottom: 0 }}>
+            Os tempos de contrato (3, 6, 12 meses…) você ajusta na simulação, logo abaixo, na seção 3.
+          </p>
         </section>
       </div>
 
@@ -185,10 +280,10 @@ export default function PropostaPage() {
         <h3 style={{ marginTop: 18 }}>Simulação por tempo de contrato</h3>
         <ContractSimulation fixedTotal={fixedTotal} recurringTotal={recurringTotal} terms={terms} onTermsChange={setTerms} />
 
-        {settings.proposalNotes && (
+        {notes.trim() && (
           <>
             <h2>4. Condições</h2>
-            <p style={{ whiteSpace: "pre-wrap" }}>{settings.proposalNotes}</p>
+            <p style={{ whiteSpace: "pre-wrap" }}>{notes}</p>
           </>
         )}
       </article>
